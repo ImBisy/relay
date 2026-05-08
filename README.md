@@ -20,21 +20,31 @@ Relay provides a frictionless voice-controlled experience for managing communica
 
 ## Architecture
 
+Relay is **code-first, tool-driven, and deterministic**. Code decides what
+action to take; an LLM is only used afterwards to polish content (email
+bodies, reminder wording, note formatting) and for general chat when no
+tool applies.
+
 ```
-Voice Input → Speech-to-Text → Intent Parser → Action Router → Tool Execution → Response
+Input → Router (code) → ActionPlan → Tool(s) → Storage → Response
+                                       ↳ (optional) Content enrichment via LLM
 ```
 
 ### Components
 
-| Component           | Purpose                                                      |
-| ------------------- | ------------------------------------------------------------ |
-| `VoiceInput`        | Speech recognition and hotkey handling                       |
-| `IntentParser`      | Rule-based parsing with OpenRouter fallback                  |
-| `RelayOrchestrator` | Main coordination and routing                                |
-| `PersonalityEngine` | Relay response generation                                    |
-| `Tools`             | Email, Calendar, Reminders, Notes, Timer, System, Web, Query |
-| `OpenRouterClient`  | Complex reasoning and LLM tasks                              |
-| `TextToSpeech`      | Voice output                                                 |
+| Component             | Purpose                                                              |
+| --------------------- | -------------------------------------------------------------------- |
+| `Router`              | Deterministic routing — confirmation / cancellation / chat / command |
+| `ActionPlan`          | Multi-step plan (e.g. "send email and take a note")                  |
+| `ToolRegistry`        | Lookup of tools by name / alias                                      |
+| `Tools`               | Email, Calendar, Reminders, Notes, Timer, System, Web, Query         |
+| `Storage` (SQLite)    | Reminders, notes, calendar, action logs, pending actions             |
+| `PendingActionsStore` | Structured confirmation records (no in-process callbacks)            |
+| `ContentEngine`       | Optional LLM polish for emails / reminders / notes                   |
+| `ChatService`         | Isolated boundary for general LLM conversation                       |
+| `RelayOrchestrator`   | Thin coordinator — dispatch, log, render                             |
+| `PersonalityEngine`   | Renders structured results into calm, concise replies                |
+| `Frontend dashboard`  | FastAPI dashboard at `/` for browsing reminders / notes / logs       |
 
 ## Installation
 
@@ -85,6 +95,13 @@ python -m src.main --voice
 ```bash
 python -m src.main --voice --continuous
 # Say "Relay" to wake, then speak your command
+```
+
+### Dashboard
+
+```bash
+python -m src.main --serve
+# Open http://127.0.0.1:7474 to browse reminders, notes, logs and pending actions
 ```
 
 ## Commands

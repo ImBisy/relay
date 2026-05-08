@@ -3,7 +3,7 @@ Configuration management for Relay Assistant.
 """
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from pathlib import Path
 import json
 

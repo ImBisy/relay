@@ -3,7 +3,7 @@ Intent parsing - converts natural language to structured commands.
 Uses rule-based matching with OpenRouter fallback for complex cases.
 """
 import re
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from .models import ParsedIntent, ActionType, EntityExtractor
 
 

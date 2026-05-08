@@ -24,6 +24,12 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
 
 # IDE
 .vscode/

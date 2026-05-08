@@ -1,0 +1,51 @@
+"""Shared fixtures for the Relay test suite."""
+from __future__ import annotations
+
+import pytest
+
+from src.chat.chat_service import ChatService
+from src.content.engine import ContentEngine
+from src.core.orchestrator import RelayOrchestrator
+from src.core.router import Router
+from src.intent.parser import IntentParser
+from src.personality.responder import PersonalityEngine
+from src.storage import (
+    CalendarStore,
+    Database,
+    LogsStore,
+    NotesStore,
+    PendingActionsStore,
+    RemindersStore,
+)
+
+
+@pytest.fixture
+def db(tmp_path):
+    return Database(tmp_path / "relay.sqlite")
+
+
+@pytest.fixture
+def stores(db):
+    return {
+        "reminders": RemindersStore(db),
+        "notes": NotesStore(db),
+        "calendar": CalendarStore(db),
+        "logs": LogsStore(db),
+        "pending": PendingActionsStore(db),
+    }
+
+
+@pytest.fixture
+def orchestrator(stores):
+    return RelayOrchestrator(
+        reminders=stores["reminders"],
+        notes=stores["notes"],
+        calendar=stores["calendar"],
+        logs=stores["logs"],
+        pending_actions=stores["pending"],
+        content_engine=ContentEngine(enabled=False),
+        chat_service=ChatService(openrouter_client=None),
+        personality=PersonalityEngine(),
+        router=Router(IntentParser()),
+        openrouter_client=None,
+    )
