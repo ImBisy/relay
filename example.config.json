@@ -1,0 +1,41 @@
+{
+	"email": {
+		"accounts": {
+			"Work": {
+				"smtp_server": "smtp.gmail.com",
+				"smtp_port": 587,
+				"username": "your-work-email@gmail.com",
+				"password": "your-app-password",
+				"from_address": "your-work-email@gmail.com"
+			},
+			"Personal": {
+				"smtp_server": "smtp.gmail.com",
+				"smtp_port": 587,
+				"username": "your-email@gmail.com",
+				"password": "your-app-password",
+				"from_address": "your-email@gmail.com"
+			}
+		},
+		"aliases": {
+			"boss": "boss@company.com",
+			"team": "team@company.com",
+			"family": "family-group@example.com"
+		}
+	},
+	"api": {
+		"openrouter_api_key": "sk-or-v1-...",
+		"openrouter_base_url": "https://openrouter.ai/api/v1",
+		"openrouter_model": "anthropic/claude-3.5-sonnet"
+	},
+	"voice": {
+		"wake_word": "relay",
+		"hotkey": "cmd+shift+j",
+		"speech_rate": 180
+	},
+	"user": {
+		"name": "Your Name",
+		"timezone": "America/New_York",
+		"date_format": "%Y-%m-%d",
+		"time_format": "%I:%M %p"
+	}
+}
