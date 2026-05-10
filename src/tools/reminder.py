@@ -1,281 +1,225 @@
+"""Reminder tool — backed by SQLite via RemindersStore.
+
+Creates structured ``Reminder`` records, schedules an in-process timer
+for due reminders when a ``remind_at`` is known, and supports listing,
+completing, and deleting reminders.
 """
-Reminder tool for quick task capture.
-"""
-import json
+from __future__ import annotations
+
+import re
 import threading
-import time
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Callable
-from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+from ..core.context import ToolContext
+from ..core.safety import SafetyLevel
+from ..storage import RemindersStore
+from ..storage.models import Reminder
 from .base import BaseTool, ToolResult
-from ..config.settings import config
 
 
 class ReminderTool(BaseTool):
-    """
-    Reminder management tool.
-    
-    Quick capture from speech, supports natural phrasing.
-    No confirmation required.
-    """
-    
+    """Quick capture for time-bound tasks."""
+
     name = "reminder"
+    aliases = ["reminders", "remind"]
     description = "Create and manage reminders"
     requires_confirmation = False
-    
-    def __init__(self, notification_callback: Optional[Callable] = None):
-        self.data_dir = config.get_data_dir()
-        self.reminders_file = self.data_dir / "reminders.json"
+    safety_level = SafetyLevel.REVERSIBLE
+    supported_actions = ["create", "list", "complete", "delete"]
+
+    def __init__(self,
+                 store: Optional[RemindersStore] = None,
+                 notification_callback: Optional[Any] = None) -> None:
+        self.store = store
         self.notification_callback = notification_callback
-        self._ensure_data_file()
-        self._active_timers: Dict[str, threading.Timer] = {}
-    
-    def _ensure_data_file(self):
-        """Ensure reminders data file exists."""
-        if not self.reminders_file.exists():
-            with open(self.reminders_file, 'w') as f:
-                json.dump({}, f)
-    
-    def execute(self, entities: Dict[str, Any]) -> ToolResult:
-        """Execute reminder action."""
-        action = entities.get('reminder_action', 'create')
-        
-        if action == 'list':
-            return self._list_reminders()
-        elif action == 'complete':
-            return self._complete_reminder(entities)
-        elif action == 'delete':
-            return self._delete_reminder(entities)
-        else:
-            return self._create_reminder(entities)
-    
-    def _create_reminder(self, entities: Dict[str, Any]) -> ToolResult:
-        """Create a new reminder."""
-        is_valid, error = self.validate(entities)
-        if not is_valid:
-            return ToolResult.failure(f"Invalid reminder: {error}")
-        
-        reminder_text = entities.get('reminder_text', entities.get('content', ''))
-        
-        # Parse when to remind
-        remind_when = self._parse_reminder_time(entities)
-        
-        reminder_data = {
-            'id': self._generate_reminder_id(),
-            'text': reminder_text,
-            'created_at': datetime.now().isoformat(),
-            'remind_at': remind_when.isoformat() if remind_when else None,
-            'completed': False,
-        }
-        
-        # Save reminder
-        reminders = self._load_reminders()
-        reminders[reminder_data['id']] = reminder_data
-        self._save_reminders(reminders)
-        
-        # Set timer if time specified
-        if remind_when:
-            self._schedule_notification(reminder_data['id'], remind_when, reminder_text)
-            time_str = remind_when.strftime("%I:%M %p")
-            return ToolResult.success(
-                f"Reminder set for {time_str}: {reminder_text}",
-                data={'reminder_id': reminder_data['id'], 'remind_at': remind_when.isoformat()}
-            )
-        
-        return ToolResult.success(
-            f"Captured: {reminder_text}",
-            data={'reminder_id': reminder_data['id']}
-        )
-    
-    def _list_reminders(self) -> ToolResult:
-        """List active reminders."""
-        reminders = self._load_reminders()
-        active = [r for r in reminders.values() if not r['completed']]
-        
-        if not active:
-            return ToolResult.success("No active reminders.")
-        
-        # Sort by remind_at time
-        active.sort(key=lambda r: r.get('remind_at') or '9999')
-        
-        reminder_list = []
-        for r in active:
-            text = r['text']
-            if r.get('remind_at'):
-                dt = datetime.fromisoformat(r['remind_at'])
-                time_str = dt.strftime("%I:%M %p")
-                reminder_list.append(f"[{time_str}] {text}")
-            else:
-                reminder_list.append(text)
-        
-        return ToolResult.success(
-            f"You have {len(active)} reminder(s):",
-            data={'reminders': reminder_list}
-        )
-    
-    def _complete_reminder(self, entities: Dict[str, Any]) -> ToolResult:
-        """Mark reminder as complete."""
-        reminder_id = entities.get('reminder_id')
-        
-        if not reminder_id:
-            # Try to match by text
-            text = entities.get('content', '')
-            reminders = self._load_reminders()
-            
-            for rid, r in reminders.items():
-                if text.lower() in r['text'].lower():
-                    reminder_id = rid
-                    break
-        
-        if not reminder_id:
-            return ToolResult.failure("Could not identify reminder to complete")
-        
-        reminders = self._load_reminders()
-        
-        if reminder_id not in reminders:
-            return ToolResult.failure("Reminder not found")
-        
-        reminders[reminder_id]['completed'] = True
-        reminders[reminder_id]['completed_at'] = datetime.now().isoformat()
-        
-        self._save_reminders(reminders)
-        
-        # Cancel any pending timer
-        if reminder_id in self._active_timers:
-            self._active_timers[reminder_id].cancel()
-            del self._active_timers[reminder_id]
-        
-        return ToolResult.success("Reminder completed.")
-    
-    def _delete_reminder(self, entities: Dict[str, Any]) -> ToolResult:
-        """Delete a reminder."""
-        reminder_id = entities.get('reminder_id')
-        
-        if not reminder_id:
-            return ToolResult.failure("Reminder ID required")
-        
-        reminders = self._load_reminders()
-        
-        if reminder_id not in reminders:
-            return ToolResult.failure("Reminder not found")
-        
-        del reminders[reminder_id]
-        self._save_reminders(reminders)
-        
-        # Cancel any pending timer
-        if reminder_id in self._active_timers:
-            self._active_timers[reminder_id].cancel()
-            del self._active_timers[reminder_id]
-        
-        return ToolResult.success("Reminder deleted.")
-    
-    def validate(self, entities: Dict[str, Any]) -> tuple[bool, Optional[str]]:
-        """Validate reminder entities."""
-        reminder_text = (
-            entities.get('reminder_text') or 
-            entities.get('content') or
-            entities.get('text')
-        )
-        
-        if not reminder_text:
+        self._timers: Dict[str, threading.Timer] = {}
+        self._timers_lock = threading.Lock()
+
+    # ----- BaseTool API -----
+
+    def execute(self, args: Dict[str, Any], ctx: Optional[ToolContext] = None) -> ToolResult:
+        store = self._resolve_store(ctx)
+        action = args.get("reminder_action", "create")
+
+        if action == "list":
+            return self._list(store)
+        if action == "complete":
+            return self._complete(args, store)
+        if action == "delete":
+            return self._delete(args, store)
+        return self._create(args, store, ctx)
+
+    def validate(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        action = args.get("reminder_action", "create")
+        if action in ("list",):
+            return True, None
+        if action in ("complete", "delete"):
+            if not (args.get("reminder_id") or args.get("content")):
+                return False, "Reminder identifier required"
+            return True, None
+        # create
+        text = args.get("reminder_text") or args.get("content") or args.get("text")
+        if not text or not text.strip():
             return False, "Reminder text required"
-        
         return True, None
-    
-    def _parse_reminder_time(self, entities: Dict[str, Any]) -> Optional[datetime]:
-        """Parse when to remind from entities."""
-        # Check for explicit time
-        if 'remind_in_minutes' in entities:
-            minutes = entities['remind_in_minutes']
-            return datetime.now() + timedelta(minutes=minutes)
-        
-        # Check for time patterns in content
-        text = entities.get('reminder_text', entities.get('content', ''))
-        text_lower = text.lower()
-        
-        # Pattern: "in X minutes/hours"
-        import re
-        match = re.search(r'in\s+(\d+)\s*(min|minute|minutes|hour|hours|hr)', text_lower)
+
+    def preview(self, args: Dict[str, Any]) -> str:
+        text = args.get("reminder_text") or args.get("content") or ""
+        when = args.get("remind_in_minutes")
+        if when:
+            return f"Reminder: {text} (in {when} min)"
+        return f"Reminder: {text}"
+
+    # ----- internals -----
+
+    def _resolve_store(self, ctx: Optional[ToolContext]) -> RemindersStore:
+        if ctx and ctx.reminders is not None:
+            return ctx.reminders
+        if self.store is not None:
+            return self.store
+        return RemindersStore()
+
+    def _create(self, args: Dict[str, Any], store: RemindersStore,
+                ctx: Optional[ToolContext]) -> ToolResult:
+        ok, error = self.validate(args)
+        if not ok:
+            return ToolResult.failure(f"Invalid reminder: {error}")
+
+        text = (args.get("reminder_text") or args.get("content") or args.get("text") or "").strip()
+
+        # Optional content polishing — never changes meaning, only wording.
+        if ctx and ctx.content is not None:
+            text = ctx.content.polish_reminder(text) or text
+
+        when = self._resolve_remind_at(args)
+        reminder = Reminder(
+            id=RemindersStore.new_id(),
+            text=text,
+            remind_at=when.isoformat(timespec="seconds") if when else None,
+            source=ctx.source if ctx else None,
+        )
+        store.create(reminder)
+
+        if when is not None:
+            self._schedule_notification(reminder.id, when, text,
+                                         ctx.notification_callback if ctx else None)
+            time_str = when.strftime("%I:%M %p")
+            return ToolResult.success(
+                f"Reminder set for {time_str}: {text}",
+                data={"reminder_id": reminder.id, "remind_at": reminder.remind_at, "text": text},
+                preview=self.preview({"reminder_text": text, "remind_in_minutes": args.get("remind_in_minutes")}),
+            )
+        return ToolResult.success(
+            f"Captured: {text}",
+            data={"reminder_id": reminder.id, "text": text},
+            preview=self.preview({"reminder_text": text}),
+        )
+
+    def _list(self, store: RemindersStore) -> ToolResult:
+        items = store.list_active(limit=20)
+        if not items:
+            return ToolResult.success("No active reminders.", data={"reminders": []})
+        formatted = []
+        for r in items:
+            if r.remind_at:
+                try:
+                    dt = datetime.fromisoformat(r.remind_at)
+                    formatted.append(f"[{dt.strftime('%I:%M %p')}] {r.text}")
+                except ValueError:
+                    formatted.append(r.text)
+            else:
+                formatted.append(r.text)
+        return ToolResult.success(
+            f"You have {len(items)} reminder(s):",
+            data={"reminders": formatted, "items": [r.to_public() for r in items]},
+        )
+
+    def _complete(self, args: Dict[str, Any], store: RemindersStore) -> ToolResult:
+        reminder_id = args.get("reminder_id")
+        if not reminder_id:
+            text = (args.get("content") or "").strip().lower()
+            if not text:
+                return ToolResult.failure("Could not identify reminder.")
+            for r in store.list_active(limit=50):
+                if text in r.text.lower():
+                    reminder_id = r.id
+                    break
+        if not reminder_id:
+            return ToolResult.failure("Reminder not found.")
+        if not store.mark_completed(reminder_id):
+            return ToolResult.failure("Reminder not found or already complete.")
+        self._cancel_timer(reminder_id)
+        return ToolResult.success("Reminder completed.", data={"reminder_id": reminder_id})
+
+    def _delete(self, args: Dict[str, Any], store: RemindersStore) -> ToolResult:
+        reminder_id = args.get("reminder_id")
+        if not reminder_id:
+            return ToolResult.failure("Reminder ID required.")
+        if not store.delete(reminder_id):
+            return ToolResult.failure("Reminder not found.")
+        self._cancel_timer(reminder_id)
+        return ToolResult.success("Reminder deleted.", data={"reminder_id": reminder_id})
+
+    def _resolve_remind_at(self, args: Dict[str, Any]) -> Optional[datetime]:
+        if "remind_in_minutes" in args and args["remind_in_minutes"]:
+            return datetime.utcnow() + timedelta(minutes=int(args["remind_in_minutes"]))
+        text = (args.get("reminder_text") or args.get("content") or "").lower()
+        match = re.search(r"in\s+(\d+)\s*(min|minute|minutes|hour|hours|hr)", text)
         if match:
             amount = int(match.group(1))
             unit = match.group(2)
-            if unit.startswith('hour'):
-                return datetime.now() + timedelta(hours=amount)
-            else:
-                return datetime.now() + timedelta(minutes=amount)
-        
-        # Pattern: "at 3pm", "at 15:00"
-        match = re.search(r'at\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?', text_lower)
+            if unit.startswith("hour") or unit.startswith("hr"):
+                return datetime.utcnow() + timedelta(hours=amount)
+            return datetime.utcnow() + timedelta(minutes=amount)
+        match = re.search(r"at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
         if match:
             hour = int(match.group(1))
             minute = int(match.group(2)) if match.group(2) else 0
             ampm = match.group(3)
-            
-            if ampm == 'pm' and hour != 12:
+            if ampm == "pm" and hour != 12:
                 hour += 12
-            elif ampm == 'am' and hour == 12:
+            elif ampm == "am" and hour == 12:
                 hour = 0
-            
-            target = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
-            
-            # If time has passed today, schedule for tomorrow
-            if target < datetime.now():
+            now = datetime.now()
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target < now:
                 target += timedelta(days=1)
-            
             return target
-        
-        # Pattern: "tomorrow", "next week"
-        if 'tomorrow' in text_lower:
+        if "tomorrow" in text:
             tomorrow = datetime.now() + timedelta(days=1)
             return tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
-        
-        if 'next week' in text_lower:
-            next_week = datetime.now() + timedelta(days=7)
-            return next_week.replace(hour=9, minute=0, second=0, microsecond=0)
-        
-        return None  # No time specified, will be task-only
-    
-    def _schedule_notification(self, reminder_id: str, when: datetime, text: str):
-        """Schedule a notification timer."""
-        now = datetime.now()
-        delay_seconds = max(0, (when - now).total_seconds())
-        
-        def notify():
-            if self.notification_callback:
-                self.notification_callback(f"Reminder: {text}")
-            
-            # Mark as triggered
-            reminders = self._load_reminders()
-            if reminder_id in reminders:
-                reminders[reminder_id]['triggered'] = True
-                self._save_reminders(reminders)
-        
-        timer = threading.Timer(delay_seconds, notify)
+        return None
+
+    def _schedule_notification(self, reminder_id: str, when: datetime,
+                               text: str,
+                               ctx_callback: Optional[Any]) -> None:
+        delay = max(0.0, (when - datetime.utcnow()).total_seconds())
+        callback = ctx_callback or self.notification_callback
+
+        def _fire() -> None:
+            if callback:
+                try:
+                    callback(f"Reminder: {text}")
+                except Exception:  # pragma: no cover - best effort
+                    pass
+            self._cancel_timer(reminder_id)
+
+        timer = threading.Timer(delay, _fire)
         timer.daemon = True
+        with self._timers_lock:
+            self._timers[reminder_id] = timer
         timer.start()
-        
-        self._active_timers[reminder_id] = timer
-    
-    def _load_reminders(self) -> Dict[str, Dict]:
-        """Load reminders from storage."""
-        try:
-            with open(self.reminders_file) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-    
-    def _save_reminders(self, reminders: Dict[str, Dict]):
-        """Save reminders to storage."""
-        with open(self.reminders_file, 'w') as f:
-            json.dump(reminders, f, indent=2, default=str)
-    
-    def _generate_reminder_id(self) -> str:
-        """Generate unique reminder ID."""
-        import uuid
-        return f"rem_{uuid.uuid4().hex[:12]}"
-    
-    def cleanup(self):
-        """Clean up all active timers."""
-        for timer in self._active_timers.values():
+
+    def _cancel_timer(self, reminder_id: str) -> None:
+        with self._timers_lock:
+            timer = self._timers.pop(reminder_id, None)
+        if timer is not None:
             timer.cancel()
-        self._active_timers.clear()
+
+    def cleanup(self) -> None:
+        with self._timers_lock:
+            timers = list(self._timers.values())
+            self._timers.clear()
+        for t in timers:
+            t.cancel()

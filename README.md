@@ -20,21 +20,45 @@ Relay provides a frictionless voice-controlled experience for managing communica
 
 ## Architecture
 
+Relay is **code-first, tool-driven, and deterministic**. The only place
+natural language is *interpreted* is the schema-based intent extractor
+(Instructor + Pydantic, fast model). Tool dispatch, confirmations, and
+persistence happen on the structured output — not on the model.
+
 ```
-Voice Input → Speech-to-Text → Intent Parser → Action Router → Tool Execution → Response
+Input → IntentExtractor (LLM, fast) → typed Intent objects
+      → Router (code) → ActionPlan → Tool(s) → Storage → Response
+                                          ↳ (optional) Content polish via LLM
 ```
+
+### Two-model strategy
+
+| Model       | Used for                                              | Default                              |
+| ----------- | ----------------------------------------------------- | ------------------------------------ |
+| Fast model  | Intent extraction / routing                           | `qwen/qwen-2.5-7b-instruct:free`     |
+| Slow model  | Content polish (email body / subject, notes), chat    | `anthropic/claude-3.5-sonnet`        |
+
+The fast model never picks tools; the slow model never picks tools.
+When no API key is configured the extractor falls back to a small
+deterministic keyword classifier so the assistant remains usable
+offline.
 
 ### Components
 
-| Component           | Purpose                                                      |
-| ------------------- | ------------------------------------------------------------ |
-| `VoiceInput`        | Speech recognition and hotkey handling                       |
-| `IntentParser`      | Rule-based parsing with OpenRouter fallback                  |
-| `RelayOrchestrator` | Main coordination and routing                                |
-| `PersonalityEngine` | Relay response generation                                    |
-| `Tools`             | Email, Calendar, Reminders, Notes, Timer, System, Web, Query |
-| `OpenRouterClient`  | Complex reasoning and LLM tasks                              |
-| `TextToSpeech`      | Voice output                                                 |
+| Component             | Purpose                                                              |
+| --------------------- | -------------------------------------------------------------------- |
+| `IntentExtractor`     | Fast LLM → typed `Intent` objects (with offline fallback)            |
+| `Router`              | Deterministic routing — confirmation / cancellation / chat / command |
+| `ActionPlan`          | Multi-step plan (e.g. "send email and take a note")                  |
+| `ToolRegistry`        | Lookup of tools by name / alias                                      |
+| `Tools`               | Email, Calendar, Reminders, Notes, Timer, System, Web, Query         |
+| `Storage` (SQLite)    | Reminders, notes, calendar, action logs, pending actions             |
+| `PendingActionsStore` | Structured confirmation records (no in-process callbacks)            |
+| `ContentEngine`       | Optional LLM polish for emails / reminders / notes                   |
+| `ChatService`         | Isolated boundary for general LLM conversation                       |
+| `RelayOrchestrator`   | Thin coordinator — dispatch, log, render                             |
+| `PersonalityEngine`   | Renders structured results into calm, concise replies                |
+| `Frontend dashboard`  | FastAPI dashboard at `/` for browsing reminders / notes / logs       |
 
 ## Installation
 
@@ -85,6 +109,13 @@ python -m src.main --voice
 ```bash
 python -m src.main --voice --continuous
 # Say "Relay" to wake, then speak your command
+```
+
+### Dashboard
+
+```bash
+python -m src.main --serve
+# Open http://127.0.0.1:7474 to browse reminders, notes, logs and pending actions
 ```
 
 ## Commands
@@ -160,7 +191,14 @@ python -m src.main --voice --continuous
 
 ## Configuration
 
-Configuration is stored in `~/.relay/config.json`:
+Configuration is stored in two places:
+
+1. **`.env` at the repo root** (recommended for keys). Copy
+   `.env.example` to `.env` and fill in `OPENROUTER_API_KEY`. The
+   same key is reused by every LLM-backed subsystem (intent
+   extractor, chat, content polish).
+2. **`~/.relay/config.json`** for email accounts and per-machine
+   overrides:
 
 ```json
 {
@@ -176,8 +214,8 @@ Configuration is stored in `~/.relay/config.json`:
 		}
 	},
 	"api": {
-		"openrouter_api_key": "...",
-		"openrouter_model": "anthropic/claude-3.5-sonnet"
+		"fast_model": "qwen/qwen-2.5-7b-instruct:free",
+		"slow_model": "anthropic/claude-3.5-sonnet"
 	},
 	"voice": {
 		"wake_word": "relay",
@@ -229,14 +267,20 @@ Examples:
 relay/
 ├── src/
 │   ├── agents/          # OpenRouter client
-│   ├── config/          # Settings management
-│   ├── core/            # Main orchestrator
+│   ├── chat/            # Free-form chat boundary
+│   ├── config/          # Settings + .env loader
+│   ├── content/         # Optional LLM polish (slow model)
+│   ├── core/            # Router, orchestrator, action plans
+│   ├── frontend/        # FastAPI dashboard
 │   ├── input/           # Voice input (STT)
-│   ├── intent/          # Intent parsing
+│   ├── llm/             # Schema-based intent extraction (fast model)
 │   ├── output/          # TTS
-│   ├── personality/     # Response generation
+│   ├── personality/     # Response renderer
+│   ├── storage/         # SQLite stores + models
 │   ├── tools/           # Tool implementations
 │   └── main.py          # Entry point
+├── tests/
+├── .env.example
 ├── requirements.txt
 └── README.md
 ```
@@ -251,11 +295,7 @@ relay/
 ### Testing
 
 ```bash
-# Test specific tool
-python -c "from src.tools.email import EmailTool; ..."
-
-# Test intent parsing
-python -c "from src.intent.parser import IntentParser; ..."
+pytest tests/ -q
 ```
 
 ## License

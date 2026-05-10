@@ -1,195 +1,143 @@
-"""
-Notes tool for fast idea capture.
-"""
-import json
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-from pathlib import Path
+"""Notes tool — fast capture, backed by SQLite via NotesStore."""
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Tuple
+
+from ..core.context import ToolContext
+from ..core.safety import SafetyLevel
+from ..storage import NotesStore
+from ..storage.models import Note
 from .base import BaseTool, ToolResult
-from ..config.settings import config
+
+
+_PREFIXES = (
+    "note that", "note:", "take a note", "make a note",
+    "jot down", "write down", "capture this", "remember this",
+)
 
 
 class NotesTool(BaseTool):
-    """
-    Fast append-only note capture system.
-    
-    No friction - just capture and store.
-    Supports voice-to-text input directly.
-    """
-    
+    """Append-only notes capture."""
+
     name = "note"
+    aliases = ["notes"]
     description = "Capture quick notes and ideas"
     requires_confirmation = False
-    
-    def __init__(self):
-        self.data_dir = config.get_data_dir()
-        self.notes_file = self.data_dir / "notes.json"
-        self._ensure_data_file()
-    
-    def _ensure_data_file(self):
-        """Ensure notes data file exists."""
-        if not self.notes_file.exists():
-            with open(self.notes_file, 'w') as f:
-                json.dump([], f)
-    
-    def execute(self, entities: Dict[str, Any]) -> ToolResult:
-        """Execute note action."""
-        action = entities.get('note_action', 'add')
-        
-        if action == 'list':
-            return self._list_notes(entities)
-        elif action == 'search':
-            return self._search_notes(entities)
-        else:
-            return self._add_note(entities)
-    
-    def _add_note(self, entities: Dict[str, Any]) -> ToolResult:
-        """Add a new note."""
-        is_valid, error = self.validate(entities)
-        if not is_valid:
-            return ToolResult.failure(f"Cannot capture note: {error}")
-        
-        # Get note content
-        content = (
-            entities.get('note_text') or 
-            entities.get('content') or 
-            entities.get('text')
-        )
-        
-        # Clean up common prefixes that might remain
-        prefixes_to_remove = [
-            'note that', 'note:', 'take a note', 'make a note',
-            'jot down', 'write down', 'capture this', 'remember this'
-        ]
-        
-        content_lower = content.lower()
-        for prefix in prefixes_to_remove:
-            if content_lower.startswith(prefix):
-                content = content[len(prefix):].strip()
-                content = content.lstrip(':').strip()
-                break
-        
-        note_data = {
-            'id': self._generate_note_id(),
-            'content': content,
-            'created_at': datetime.now().isoformat(),
-            'tags': entities.get('tags', []),
-            'source': entities.get('source', 'voice'),
-        }
-        
-        # Load and append
-        notes = self._load_notes()
-        notes.append(note_data)
-        self._save_notes(notes)
-        
-        # Truncate for response if very long
-        display_content = content
-        if len(display_content) > 50:
-            display_content = display_content[:50] + "..."
-        
-        return ToolResult.success(
-            f"Captured: {display_content}",
-            data={'note_id': note_data['id']}
-        )
-    
-    def _list_notes(self, entities: Dict[str, Any]) -> ToolResult:
-        """List recent notes."""
-        notes = self._load_notes()
-        
-        # Sort by date (newest first)
-        notes.sort(key=lambda n: n['created_at'], reverse=True)
-        
-        # Limit
-        limit = entities.get('limit', 5)
-        recent_notes = notes[:limit]
-        
-        if not recent_notes:
-            return ToolResult.success("No notes yet.")
-        
-        note_list = []
-        for note in recent_notes:
-            dt = datetime.fromisoformat(note['created_at'])
-            time_str = dt.strftime("%I:%M %p")
-            content = note['content']
-            if len(content) > 40:
-                content = content[:40] + "..."
-            note_list.append(f"[{time_str}] {content}")
-        
-        return ToolResult.success(
-            f"Your {len(recent_notes)} most recent note(s):",
-            data={'notes': note_list}
-        )
-    
-    def _search_notes(self, entities: Dict[str, Any]) -> ToolResult:
-        """Search notes."""
-        query = entities.get('query', entities.get('content', ''))
-        
-        if not query:
-            return ToolResult.failure("Search query required")
-        
-        notes = self._load_notes()
-        query_lower = query.lower()
-        
-        matching = [
-            n for n in notes 
-            if query_lower in n['content'].lower() or
-            any(query_lower in tag.lower() for tag in n.get('tags', []))
-        ]
-        
-        if not matching:
-            return ToolResult.success(f"No notes found for '{query}'.")
-        
-        # Sort by relevance (exact match first)
-        matching.sort(
-            key=lambda n: (
-                0 if query_lower in n['content'].lower().split() else 1,
-                n['created_at']
-            ),
-            reverse=True
-        )
-        
-        note_list = []
-        for note in matching[:10]:  # Limit results
-            content = note['content']
-            if len(content) > 50:
-                content = content[:50] + "..."
-            note_list.append(content)
-        
-        return ToolResult.success(
-            f"Found {len(matching)} note(s):",
-            data={'notes': note_list}
-        )
-    
-    def validate(self, entities: Dict[str, Any]) -> tuple[bool, Optional[str]]:
-        """Validate note entities."""
-        content = (
-            entities.get('note_text') or 
-            entities.get('content') or 
-            entities.get('text')
-        )
-        
-        if not content:
-            return False, "Note content required"
-        
+    safety_level = SafetyLevel.REVERSIBLE
+    supported_actions = ["add", "list", "search", "delete"]
+
+    def __init__(self, store: Optional[NotesStore] = None) -> None:
+        self.store = store
+
+    def execute(self, args: Dict[str, Any], ctx: Optional[ToolContext] = None) -> ToolResult:
+        store = self._resolve_store(ctx)
+        action = args.get("note_action", "add")
+        if action == "list":
+            return self._list(args, store)
+        if action == "search":
+            return self._search(args, store)
+        if action == "delete":
+            return self._delete(args, store)
+        return self._add(args, store, ctx)
+
+    def validate(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        action = args.get("note_action", "add")
+        if action == "list":
+            return True, None
+        if action == "search":
+            if not (args.get("query") or args.get("content")):
+                return False, "Search query required"
+            return True, None
+        if action == "delete":
+            if not args.get("note_id"):
+                return False, "Note id required"
+            return True, None
+        # add
+        content = args.get("note_text") or args.get("content") or args.get("text") or ""
         if len(content.strip()) < 2:
             return False, "Note too short"
-        
         return True, None
-    
-    def _load_notes(self) -> List[Dict]:
-        """Load notes from storage."""
-        try:
-            with open(self.notes_file) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return []
-    
-    def _save_notes(self, notes: List[Dict]):
-        """Save notes to storage."""
-        with open(self.notes_file, 'w') as f:
-            json.dump(notes, f, indent=2, default=str)
-    
-    def _generate_note_id(self) -> str:
-        """Generate unique note ID."""
-        import uuid
-        return f"note_{uuid.uuid4().hex[:12]}"
+
+    def preview(self, args: Dict[str, Any]) -> str:
+        content = (args.get("note_text") or args.get("content") or "").strip()
+        if len(content) > 60:
+            content = content[:60] + "..."
+        return f"Note: {content}"
+
+    def _resolve_store(self, ctx: Optional[ToolContext]) -> NotesStore:
+        if ctx and ctx.notes is not None:
+            return ctx.notes
+        if self.store is not None:
+            return self.store
+        return NotesStore()
+
+    def _add(self, args: Dict[str, Any], store: NotesStore,
+             ctx: Optional[ToolContext]) -> ToolResult:
+        ok, error = self.validate(args)
+        if not ok:
+            return ToolResult.failure(f"Cannot capture note: {error}")
+
+        content = (args.get("note_text") or args.get("content") or args.get("text") or "").strip()
+        lower = content.lower()
+        for prefix in _PREFIXES:
+            if lower.startswith(prefix):
+                content = content[len(prefix):].lstrip(":, ").strip()
+                break
+
+        # Optional cleanup pass — formatting only, never new info.
+        if ctx and ctx.content is not None:
+            content = ctx.content.polish_note(content) or content
+
+        note = Note(
+            id=NotesStore.new_id(),
+            content=content,
+            tags=list(args.get("tags") or []),
+            source=ctx.source if ctx else None,
+        )
+        store.create(note)
+
+        display = content if len(content) <= 60 else content[:60] + "..."
+        return ToolResult.success(
+            f"Captured: {display}",
+            data={"note_id": note.id, "content": content},
+            preview=self.preview({"note_text": content}),
+        )
+
+    def _list(self, args: Dict[str, Any], store: NotesStore) -> ToolResult:
+        limit = int(args.get("limit", 10))
+        notes = store.list_recent(limit=limit)
+        if not notes:
+            return ToolResult.success("No notes yet.", data={"notes": []})
+        formatted = []
+        for n in notes:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(n.created_at)
+                ts = dt.strftime("%I:%M %p")
+            except ValueError:
+                ts = "—"
+            content = n.content if len(n.content) <= 60 else n.content[:60] + "..."
+            formatted.append(f"[{ts}] {content}")
+        return ToolResult.success(
+            f"Your {len(notes)} most recent note(s):",
+            data={"notes": formatted, "items": [n.to_public() for n in notes]},
+        )
+
+    def _search(self, args: Dict[str, Any], store: NotesStore) -> ToolResult:
+        query = (args.get("query") or args.get("content") or "").strip()
+        if not query:
+            return ToolResult.failure("Search query required")
+        results = store.search(query, limit=20)
+        if not results:
+            return ToolResult.success(f"No notes found for '{query}'.", data={"notes": []})
+        formatted = [n.content if len(n.content) <= 60 else n.content[:60] + "..." for n in results]
+        return ToolResult.success(
+            f"Found {len(results)} note(s):",
+            data={"notes": formatted, "items": [n.to_public() for n in results]},
+        )
+
+    def _delete(self, args: Dict[str, Any], store: NotesStore) -> ToolResult:
+        note_id = args.get("note_id")
+        if not note_id or not store.delete(note_id):
+            return ToolResult.failure("Note not found.")
+        return ToolResult.success("Note deleted.", data={"note_id": note_id})

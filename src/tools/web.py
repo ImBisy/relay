@@ -1,153 +1,104 @@
-"""
-Web query tool for searches and website access.
-"""
-import webbrowser
+"""Web tool — opens URLs and runs searches via the system browser."""
+from __future__ import annotations
+
 import urllib.parse
-from typing import Dict, Any, Optional
+import webbrowser
+from typing import Any, Dict, Optional, Tuple
+
+from ..core.context import ToolContext
+from ..core.safety import SafetyLevel
 from .base import BaseTool, ToolResult
 
 
+_SEARCH_ENGINES = {
+    "google": "https://www.google.com/search?q={}",
+    "duckduckgo": "https://duckduckgo.com/?q={}",
+    "bing": "https://www.bing.com/search?q={}",
+}
+
+_SHORTCUTS = {
+    "google": "https://www.google.com",
+    "gmail": "https://mail.google.com",
+    "youtube": "https://www.youtube.com",
+    "github": "https://github.com",
+    "maps": "https://maps.google.com",
+    "drive": "https://drive.google.com",
+    "calendar": "https://calendar.google.com",
+    "twitter": "https://twitter.com",
+    "x": "https://x.com",
+    "reddit": "https://www.reddit.com",
+}
+
+
 class WebTool(BaseTool):
-    """
-    Web tool for browser control and searches.
-    
-    Supports:
-    - Opening websites
-    - Performing web searches
-    """
-    
     name = "web"
+    aliases = ["browser", "search"]
     description = "Open websites and perform web searches"
     requires_confirmation = False
-    
-    # Search engine URLs
-    SEARCH_ENGINES = {
-        'google': 'https://www.google.com/search?q={}',
-        'duckduckgo': 'https://duckduckgo.com/?q={}',
-        'bing': 'https://www.bing.com/search?q={}',
-    }
-    
-    def __init__(self, default_search: str = 'google'):
-        """
-        Initialize web tool.
-        
-        Args:
-            default_search: Default search engine ('google', 'duckduckgo', 'bing')
-        """
+    safety_level = SafetyLevel.SAFE
+    supported_actions = ["search", "open"]
+
+    def __init__(self, default_search: str = "google",
+                 opener: Optional[Any] = None) -> None:
         self.default_search = default_search
-    
-    def execute(self, entities: Dict[str, Any]) -> ToolResult:
-        """Execute web action."""
-        action = entities.get('web_action', 'search')
-        
-        # Detect action from text
-        text = entities.get('content', '').lower()
-        if any(word in text for word in ['open', 'go to', 'navigate to']):
-            action = 'open'
-        elif any(word in text for word in ['search', 'look up', 'find', 'google']):
-            action = 'search'
-        
-        if action == 'open':
-            return self._open_website(entities)
-        else:
-            return self._search(entities)
-    
-    def _search(self, entities: Dict[str, Any]) -> ToolResult:
-        """Perform web search."""
-        query = entities.get('query') or entities.get('content') or entities.get('search_term')
-        
+        self._opener = opener or webbrowser.open
+
+    def execute(self, args: Dict[str, Any], ctx: Optional[ToolContext] = None) -> ToolResult:
+        action = args.get("web_action", "search")
+        text = (args.get("content") or "").lower()
+        if any(word in text for word in ("open", "go to", "navigate to")):
+            action = "open"
+        elif any(word in text for word in ("search", "look up", "find", "google")):
+            action = "search"
+
+        if action == "open":
+            return self._open(args)
+        return self._search(args)
+
+    def validate(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        if not (args.get("query") or args.get("content") or args.get("url")
+                or args.get("website")):
+            return False, "Query or URL required"
+        return True, None
+
+    def preview(self, args: Dict[str, Any]) -> str:
+        return f"Web: {args.get('query') or args.get('content') or args.get('url') or ''}"
+
+    def _search(self, args: Dict[str, Any]) -> ToolResult:
+        query = args.get("query") or args.get("content") or args.get("search_term") or ""
+        for keyword in ("search", "look up", "find", "google", "for"):
+            query = query.replace(keyword, "")
+        query = query.strip()
         if not query:
             return ToolResult.failure("Search query required")
-        
-        # Clean query (remove search keywords)
-        search_keywords = ['search', 'look up', 'find', 'google', 'for']
-        query_clean = query.lower()
-        for keyword in search_keywords:
-            query_clean = query_clean.replace(keyword, '')
-        query_clean = query_clean.strip()
-        
-        # Encode query
-        encoded_query = urllib.parse.quote(query_clean)
-        
-        # Build search URL
-        search_template = self.SEARCH_ENGINES.get(self.default_search)
-        search_url = search_template.format(encoded_query)
-        
-        # Open browser
+        encoded = urllib.parse.quote(query)
+        url = _SEARCH_ENGINES.get(self.default_search, _SEARCH_ENGINES["google"]).format(encoded)
         try:
-            webbrowser.open(search_url)
-            return ToolResult.success(
-                f"Searching for '{query_clean}'",
-                data={'search_url': search_url, 'query': query_clean}
-            )
-        except Exception as e:
-            return ToolResult.failure("Could not open browser", error=str(e))
-    
-    def _open_website(self, entities: Dict[str, Any]) -> ToolResult:
-        """Open a specific website."""
-        url_or_name = entities.get('url') or entities.get('website') or entities.get('content')
-        
-        if not url_or_name:
+            self._opener(url)
+        except Exception as exc:
+            return ToolResult.failure("Could not open browser", error=str(exc))
+        return ToolResult.success(f"Searching for '{query}'",
+                                  data={"search_url": url, "query": query})
+
+    def _open(self, args: Dict[str, Any]) -> ToolResult:
+        target = args.get("url") or args.get("website") or args.get("content") or ""
+        target = target.strip()
+        if not target:
             return ToolResult.failure("Website URL or name required")
-        
-        # Check if it's a URL or needs to be resolved
-        url = self._resolve_url(url_or_name)
-        
+        url = self._resolve_url(target)
         try:
-            webbrowser.open(url)
-            return ToolResult.success(
-                f"Opening {url}",
-                data={'url': url}
-            )
-        except Exception as e:
-            return ToolResult.failure("Could not open website", error=str(e))
-    
-    def _resolve_url(self, input_str: str) -> str:
-        """Resolve input to a valid URL."""
-        input_lower = input_str.lower().strip()
-        
-        # Check if already a URL
-        if input_lower.startswith(('http://', 'https://')):
-            return input_str
-        
-        # Common website shortcuts
-        shortcuts = {
-            'google': 'https://www.google.com',
-            'gmail': 'https://mail.google.com',
-            'youtube': 'https://www.youtube.com',
-            'github': 'https://github.com',
-            'maps': 'https://maps.google.com',
-            'drive': 'https://drive.google.com',
-            'calendar': 'https://calendar.google.com',
-            'twitter': 'https://twitter.com',
-            'x': 'https://x.com',
-            'reddit': 'https://www.reddit.com',
-            'news': 'https://news.google.com',
-            'weather': 'https://www.weather.com',
-        }
-        
-        if input_lower in shortcuts:
-            return shortcuts[input_lower]
-        
-        # Try adding https
-        if '.' in input_str:
-            return f"https://{input_str}"
-        
-        # Fallback to search
-        return self.SEARCH_ENGINES[self.default_search].format(
-            urllib.parse.quote(input_str)
-        )
-    
-    def validate(self, entities: Dict[str, Any]) -> tuple[bool, Optional[str]]:
-        """Validate web entities."""
-        has_content = (
-            entities.get('query') or 
-            entities.get('content') or 
-            entities.get('url') or
-            entities.get('website')
-        )
-        
-        if not has_content:
-            return False, "Query or URL required"
-        
-        return True, None
+            self._opener(url)
+        except Exception as exc:
+            return ToolResult.failure("Could not open website", error=str(exc))
+        return ToolResult.success(f"Opening {url}", data={"url": url})
+
+    def _resolve_url(self, value: str) -> str:
+        lower = value.lower().strip()
+        if lower.startswith(("http://", "https://")):
+            return value
+        if lower in _SHORTCUTS:
+            return _SHORTCUTS[lower]
+        if "." in value:
+            return f"https://{value}"
+        encoded = urllib.parse.quote(value)
+        return _SEARCH_ENGINES[self.default_search].format(encoded)
