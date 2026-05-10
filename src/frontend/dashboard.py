@@ -53,7 +53,7 @@ def create_app(orchestrator: Optional[RelayOrchestrator] = None) -> FastAPI:
             "notes": [n.to_public() for n in relay.notes.list_recent(limit=50)],
             "events": [e.to_public() for e in relay.calendar.list_upcoming(limit=50)],
             "logs": [le.to_public() for le in relay.logs.list_recent(limit=100)],
-            "pending": [p.to_public() for p in relay.pending_actions.list_pending(limit=20)],
+            "pending": [p.to_public() for p in relay.pending_actions.list_pending()],
         }
 
     @app.get("/api/reminders")
@@ -102,7 +102,7 @@ def create_app(orchestrator: Optional[RelayOrchestrator] = None) -> FastAPI:
 
     @app.get("/api/pending")
     def list_pending() -> List[Dict[str, Any]]:
-        return [p.to_public() for p in relay.pending_actions.list_pending(limit=50)]
+        return [p.to_public() for p in relay.pending_actions.list_pending()]
 
     @app.post("/api/command")
     def post_command(payload: CommandRequest) -> Dict[str, Any]:
@@ -257,11 +257,13 @@ function render(data) {
 
   const logs = document.getElementById('logs');
   logs.innerHTML = (data.logs || []).map(item => {
-    const cls = item.kind && item.kind.includes('failed') ? 'err'
-      : item.kind && item.kind.includes('succeeded') ? 'ok' : '';
-    return `<div class=\"row\"><span class=\"pill ${cls}\">${item.kind}</span>
-              ${escapeHtml(item.content || '')}
-              <div class=\"meta\">${item.source || ''} · ${item.created_at}</div></div>`;
+    const status = item.status || '';
+    const cls = status.includes('failed') ? 'err'
+      : status.includes('succeeded') || status === 'confirmed' ? 'ok' : '';
+    const detail = item.message || item.error || item.tool_name || item.route || '';
+    return `<div class=\"row\"><span class=\"pill ${cls}\">${escapeHtml(status)}</span>
+              ${escapeHtml(detail)}
+              <div class=\"meta\">${escapeHtml(item.source || '')} · ${item.created_at}</div></div>`;
   }).join('') || '<div class=\"meta\">no activity yet</div>';
 }
 

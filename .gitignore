@@ -48,6 +48,11 @@ ENV/
 *.json
 !example.config.json
 
+# Local environment overrides — never commit your real keys.
+.env
+.env.local
+.env.*.local
+
 # Logs
 *.log
 

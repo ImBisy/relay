@@ -20,20 +20,34 @@ Relay provides a frictionless voice-controlled experience for managing communica
 
 ## Architecture
 
-Relay is **code-first, tool-driven, and deterministic**. Code decides what
-action to take; an LLM is only used afterwards to polish content (email
-bodies, reminder wording, note formatting) and for general chat when no
-tool applies.
+Relay is **code-first, tool-driven, and deterministic**. The only place
+natural language is *interpreted* is the schema-based intent extractor
+(Instructor + Pydantic, fast model). Tool dispatch, confirmations, and
+persistence happen on the structured output — not on the model.
 
 ```
-Input → Router (code) → ActionPlan → Tool(s) → Storage → Response
-                                       ↳ (optional) Content enrichment via LLM
+Input → IntentExtractor (LLM, fast) → typed Intent objects
+      → Router (code) → ActionPlan → Tool(s) → Storage → Response
+                                          ↳ (optional) Content polish via LLM
 ```
+
+### Two-model strategy
+
+| Model       | Used for                                              | Default                              |
+| ----------- | ----------------------------------------------------- | ------------------------------------ |
+| Fast model  | Intent extraction / routing                           | `qwen/qwen-2.5-7b-instruct:free`     |
+| Slow model  | Content polish (email body / subject, notes), chat    | `anthropic/claude-3.5-sonnet`        |
+
+The fast model never picks tools; the slow model never picks tools.
+When no API key is configured the extractor falls back to a small
+deterministic keyword classifier so the assistant remains usable
+offline.
 
 ### Components
 
 | Component             | Purpose                                                              |
 | --------------------- | -------------------------------------------------------------------- |
+| `IntentExtractor`     | Fast LLM → typed `Intent` objects (with offline fallback)            |
 | `Router`              | Deterministic routing — confirmation / cancellation / chat / command |
 | `ActionPlan`          | Multi-step plan (e.g. "send email and take a note")                  |
 | `ToolRegistry`        | Lookup of tools by name / alias                                      |
@@ -177,7 +191,14 @@ python -m src.main --serve
 
 ## Configuration
 
-Configuration is stored in `~/.relay/config.json`:
+Configuration is stored in two places:
+
+1. **`.env` at the repo root** (recommended for keys). Copy
+   `.env.example` to `.env` and fill in `OPENROUTER_API_KEY`. The
+   same key is reused by every LLM-backed subsystem (intent
+   extractor, chat, content polish).
+2. **`~/.relay/config.json`** for email accounts and per-machine
+   overrides:
 
 ```json
 {
@@ -193,8 +214,8 @@ Configuration is stored in `~/.relay/config.json`:
 		}
 	},
 	"api": {
-		"openrouter_api_key": "...",
-		"openrouter_model": "anthropic/claude-3.5-sonnet"
+		"fast_model": "qwen/qwen-2.5-7b-instruct:free",
+		"slow_model": "anthropic/claude-3.5-sonnet"
 	},
 	"voice": {
 		"wake_word": "relay",
@@ -246,14 +267,20 @@ Examples:
 relay/
 ├── src/
 │   ├── agents/          # OpenRouter client
-│   ├── config/          # Settings management
-│   ├── core/            # Main orchestrator
+│   ├── chat/            # Free-form chat boundary
+│   ├── config/          # Settings + .env loader
+│   ├── content/         # Optional LLM polish (slow model)
+│   ├── core/            # Router, orchestrator, action plans
+│   ├── frontend/        # FastAPI dashboard
 │   ├── input/           # Voice input (STT)
-│   ├── intent/          # Intent parsing
+│   ├── llm/             # Schema-based intent extraction (fast model)
 │   ├── output/          # TTS
-│   ├── personality/     # Response generation
+│   ├── personality/     # Response renderer
+│   ├── storage/         # SQLite stores + models
 │   ├── tools/           # Tool implementations
 │   └── main.py          # Entry point
+├── tests/
+├── .env.example
 ├── requirements.txt
 └── README.md
 ```
@@ -268,11 +295,7 @@ relay/
 ### Testing
 
 ```bash
-# Test specific tool
-python -c "from src.tools.email import EmailTool; ..."
-
-# Test intent parsing
-python -c "from src.intent.parser import IntentParser; ..."
+pytest tests/ -q
 ```
 
 ## License

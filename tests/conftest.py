@@ -7,7 +7,7 @@ from src.chat.chat_service import ChatService
 from src.content.engine import ContentEngine
 from src.core.orchestrator import RelayOrchestrator
 from src.core.router import Router
-from src.intent.parser import IntentParser
+from src.llm.extractor import IntentExtractor
 from src.personality.responder import PersonalityEngine
 from src.storage import (
     CalendarStore,
@@ -36,7 +36,13 @@ def stores(db):
 
 
 @pytest.fixture
-def orchestrator(stores):
+def extractor():
+    """Offline extractor — exercises the deterministic fallback path."""
+    return IntentExtractor(client=None)
+
+
+@pytest.fixture
+def orchestrator(stores, extractor):
     return RelayOrchestrator(
         reminders=stores["reminders"],
         notes=stores["notes"],
@@ -46,6 +52,7 @@ def orchestrator(stores):
         content_engine=ContentEngine(enabled=False),
         chat_service=ChatService(openrouter_client=None),
         personality=PersonalityEngine(),
-        router=Router(IntentParser()),
+        router=Router(extractor),
+        extractor=extractor,
         openrouter_client=None,
     )

@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..chat.chat_service import ChatService
 from ..config.settings import config
 from ..content.engine import ContentEngine
-from ..intent.parser import IntentParser
+from ..llm.extractor import IntentExtractor, build_default_extractor
 from ..personality.responder import PersonalityEngine, ResponseContext
 from ..storage import (
     CalendarStore,
@@ -79,6 +79,7 @@ class RelayOrchestrator:
         chat_service: Optional[ChatService] = None,
         personality: Optional[PersonalityEngine] = None,
         openrouter_client: Optional[Any] = None,
+        extractor: Optional[IntentExtractor] = None,
     ) -> None:
         self.openrouter = openrouter_client or self._build_openrouter()
 
@@ -95,7 +96,12 @@ class RelayOrchestrator:
         self.response_callback: Optional[Callable[[str], None]] = None
         self.notification_callback: Optional[Callable[[str], None]] = None
 
-        self.router = router or Router(IntentParser(self.openrouter))
+        self.extractor = extractor or build_default_extractor(
+            api_key=config.api.openrouter_api_key,
+            model=config.api.fast_model,
+            base_url=config.api.openrouter_base_url,
+        )
+        self.router = router or Router(self.extractor)
         self.registry = registry or self._default_registry()
 
     # ----- public API -----
@@ -366,10 +372,12 @@ class RelayOrchestrator:
             return None
         try:
             from ..agents.openrouter import OpenRouterClient
+            # Chat + content polish use the slow model. The intent
+            # extractor builds its own client around the fast model.
             return OpenRouterClient(
                 api_key=config.api.openrouter_api_key,
                 base_url=config.api.openrouter_base_url,
-                model=config.api.openrouter_model,
+                model=config.api.slow_model,
             )
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("OpenRouter client init failed: %s", exc)

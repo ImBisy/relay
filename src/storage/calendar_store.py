@@ -46,7 +46,10 @@ class CalendarStore:
         )
         return [CalendarEvent.from_row(dict(r)) for r in rows]
 
-    def list_upcoming(self, after_iso: str, limit: int = 50) -> List[CalendarEvent]:
+    def list_upcoming(self, after_iso: Optional[str] = None,
+                      limit: int = 50) -> List[CalendarEvent]:
+        if after_iso is None:
+            after_iso = _now_iso()
         rows = self.db.query(
             """SELECT * FROM calendar_events
                WHERE start_time >= ?
