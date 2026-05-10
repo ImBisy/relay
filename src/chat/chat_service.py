@@ -41,8 +41,9 @@ class ChatService:
         if not text or not text.strip():
             return None
         if not self.openrouter:
-            return ("I'm not configured for chat yet — set OPENROUTER_API_KEY "
-                    "and try again.")
+            return ("I can chat once an LLM is wired up — drop your "
+                    "OPENROUTER_API_KEY into the .env at the repo root and "
+                    "I'll be ready to talk.")
         try:
             from ..agents.openrouter import OpenRouterMessage
             messages: List[OpenRouterMessage] = [

@@ -48,7 +48,16 @@ class EmailTool(BaseTool):
 
         recipient = self._resolve_recipient(args)
         if not recipient:
-            return ToolResult.failure("Could not determine recipient.")
+            alias = (args.get("recipient_alias") or args.get("to") or "").strip()
+            if alias:
+                return ToolResult.failure(
+                    f"I couldn't find an email for \"{alias}\". Add it under "
+                    "`email.accounts.aliases` in ~/.relay/config.json or give "
+                    "me the full address."
+                )
+            return ToolResult.failure(
+                "Tell me who to send it to — a saved alias or a full email address."
+            )
 
         body = (args.get("body") or args.get("content") or "").strip()
         subject = (args.get("subject") or "").strip()
